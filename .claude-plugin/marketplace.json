@@ -1,0 +1,8 @@
+{
+  "name": "cache-keeper",
+  "owner": { "name": "gjovanov" },
+  "metadata": {
+    "description": "Cache Keeper: a strip above Claude Code's prompt with the prompt cache's countdown and what a cold cache costs, a Handoff & Clear button, and a guard that holds a message sent into a big cold session."
+  },
+  "plugins": [{ "name": "cache-keeper", "source": "./" }]
+}

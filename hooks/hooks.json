@@ -1,0 +1,5 @@
+{
+  "description": "Cache Keeper: the strip above the prompt, the warning before the cache goes cold, and Handoff & Clear",
+  "hooks": {},
+  "modules": ["./register.ts"]
+}
