@@ -5,7 +5,7 @@
 // clock or a process: every time is a number of milliseconds since the epoch,
 // passed in.
 
-export const VERSION = '0.4.3'
+export const VERSION = '0.4.4'
 
 // ------------------------------------------------------------------ prices
 
@@ -968,6 +968,33 @@ const joinerOf = (s, separator) => (s.tight ? 0 : s.glue ? 1 : separator)
 
 /** Columns a string takes, counting each code point as one (the strip draws no wide characters). */
 export const widthOf = (text) => [...text].length
+
+/**
+ * The strip's geometry: the band draws its own collapse control at its right edge (`control`), a button is drawn
+ * wider than its label (`chrome`), `gap` sits between two buttons, and text narrower than `minText` is left out.
+ */
+export const STRIP = { control: 5, chrome: 4, gap: 1, minText: 12 }
+
+/**
+ * What buttons with these labels take on screen, chrome and gaps included.
+ * @param {readonly string[]} labels
+ */
+export function buttonsWidth(labels) {
+  return labels.reduce((sum, label) => sum + widthOf(label) + STRIP.chrome, 0) + STRIP.gap * Math.max(0, labels.length - 1)
+}
+
+/**
+ * The columns the strip's text may take in a row of `columns` beside buttons with these labels. The buttons come
+ * first: the text gets what they, the two columns before them and the band's control leave, and none at all where
+ * that is under `minText`, the row then holding the buttons alone.
+ * @param {number} columns
+ * @param {readonly string[]} labels
+ */
+export function textRoom(columns, labels) {
+  const room = columns - STRIP.control - buttonsWidth(labels) - 2
+
+  return room >= STRIP.minText ? room : 0
+}
 
 const ANSI = { good: '\x1b[32m', warn: '\x1b[33m', bad: '\x1b[31m', dim: '\x1b[2m', plain: '' }
 

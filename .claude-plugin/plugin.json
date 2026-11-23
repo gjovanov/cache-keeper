@@ -1,6 +1,6 @@
 {
   "name": "cache-keeper",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "A strip above the prompt with the prompt cache's countdown, the context size, the account's 5-hour and weekly limits (live in every session, idle ones too) and what the session costs on API billing; a notification before the cache goes cold; a Handoff & Clear button that carries the work to a fresh session; and a guard that holds a message or an answer to Claude's question sent into a big cold session, with what sending it would cost. With optional companion tools, two more ways on once the cache is cold, neither a model call: Use Latest Handoff and Pack & Clear.",
   "author": {
     "name": "gjovanov"

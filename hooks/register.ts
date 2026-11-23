@@ -1,7 +1,7 @@
 import type { EngineInterface, On } from 'claude-code'
 
 import * as core from './core.mjs'
-import { stripView, type StripButton } from './strip.tsx'
+import { footerView, stripView, type StripButton } from './strip.tsx'
 
 /**
  * Cache Keeper, the part that lives inside Claude Code: a strip above the prompt with the prompt
@@ -23,6 +23,8 @@ import { stripView, type StripButton } from './strip.tsx'
 const TICK_MS = 1000
 const REFRESH_TICKS = 2
 const HEARTBEAT_TICKS = 5
+/** A footer that has not answered for this many ticks is not on screen: the band takes the buttons from it. */
+const FOOTER_GONE_TICKS = 3
 const USAGE_TICKS = 15
 const TOAST_MS = 12_000
 /** One acct-sync run: a pack from a 500 MB transcript takes about 25 s. */
@@ -110,6 +112,7 @@ function hostOf($: EngineInterface) {
     assumeColdOverride: () => $.env.get('CACHE_KEEPER_ASSUME_COLD'),
     traceOverride: () => $.env.get('CACHE_KEEPER_TRACE'),
     ttlOverride: () => $.env.get('CACHE_KEEPER_TTL'),
+    traceUiOverride: () => $.env.get('CACHE_KEEPER_TRACE_UI'),
     now: () => $.clock.now(),
     every: (ms: number, fn: () => void) => $.clock.every(ms, fn) as Timer,
     after: (ms: number, fn: () => void) => $.clock.after(ms, fn) as Timer,
@@ -199,6 +202,18 @@ export function register(on: On) {
     overrides: { holdColdAt: null as number | null, isAssumedCold: false, isTraced: false, ttl: null as number | 'auto' | null },
     /** The trace's writes, one after another: each appends to what the one before wrote. */
     traceChain: Promise.resolve() as Promise<void>,
+    /**
+     * CACHE_KEEPER_TRACE_UI: what each drawing was handed and what it drew, by site; `pending` is written by the
+     * tick, so a render never waits on a file.
+     */
+    uiTrace: { isOn: false, last: new Map<string, { key: string; repeats: number }>(), pending: [] as string[] },
+    /**
+     * Where the buttons are drawn: in the strip while the band's tree is on screen (`bandFits`), else under the
+     * prompt, at the right end of its footer (the `SessionMode` site). `band` and `footer` say whether that site's
+     * last answer drew them. A site draws them only once the other's last answer did not, so they are never on
+     * screen twice. `footerTick`: the tick of the footer's last answer; a footer on screen answers every tick.
+     */
+    buttonSite: { bandFits: true, band: false, footer: false, footerTick: 0 },
     /** Whether acct-sync, which Pack & Clear needs, is installed; null until looked for. */
     hasPackTool: null as boolean | null,
     /** The main loop's running turn, from its `turn.start` to its end. */
@@ -342,6 +357,51 @@ export function register(on: On) {
       .catch(() => undefined)
 
     return state.traceChain
+  }
+
+  /**
+   * CACHE_KEEPER_TRACE_UI: one JSON line each time what a site was handed, or what the module drew there,
+   * changes (`repeats`: how many renders the line before it stood for), appended to `live/<session>.ui.jsonl`
+   * by the tick. Sizes, states and button keys alone.
+   */
+  function traceUi(site: string, fields: Record<string, unknown>): void {
+    const ui = state.uiTrace
+
+    if (!ui.isOn) {
+      return
+    }
+
+    const key = JSON.stringify(fields)
+    const last = ui.last.get(site)
+
+    if (last !== undefined && last.key === key) {
+      last.repeats += 1
+
+      return
+    }
+
+    ui.last.set(site, { key, repeats: 1 })
+    ui.pending.push(JSON.stringify({ at: new Date().toISOString(), v: core.VERSION, site, repeats: last?.repeats ?? 0, ...fields }))
+  }
+
+  /** The UI trace's lines so far, appended in one write. */
+  function flushUiTrace(host: Host): void {
+    const path = liveFile('.ui.jsonl')
+
+    if (!state.uiTrace.isOn || path === null || state.uiTrace.pending.length === 0) {
+      return
+    }
+
+    const lines = `${state.uiTrace.pending.splice(0).join('\n')}\n`
+
+    state.traceChain = state.traceChain
+      .then(async () => {
+        const before = await host.read(path).catch(() => '')
+        const kept = before.length > TRACE_MAX_CHARS ? before.slice(before.indexOf('\n', before.length - TRACE_MAX_CHARS / 2) + 1) : before
+
+        await host.write(path, kept + lines)
+      })
+      .catch(() => undefined)
   }
 
   /** The trace of one cold-send check: what it went on (the cache, the figure and where it came from, the threshold) and its answer. */
@@ -798,7 +858,8 @@ export function register(on: On) {
       return letGo('not-a-cold-send')
     }
 
-    // Ended before the model reads the answer: the deny below is then what the transcript keeps.
+    // The turn ends before the model reads the answer. Ending it (`$.turn.abort`) has the engine write the open call's
+    // result itself (Claude Code 2.1.322): the deny returned below never reaches the transcript.
     if (!(await endTurn(host, turnId)).ok) {
       return letGo('turn-not-ended')
     }
@@ -904,6 +965,7 @@ export function register(on: On) {
       await host.traceOverride().catch(() => undefined),
       await host.ttlOverride().catch(() => undefined),
     )
+    state.uiTrace.isOn = isSet(await host.traceUiOverride().catch(() => undefined))
     state.now = await host.now().catch(() => Date.now())
     state.boundAt = state.now
 
@@ -983,6 +1045,7 @@ export function register(on: On) {
         void pollUsage(host)
       }
 
+      flushUiTrace(host)
       host.invalidate()
     } catch {
       // a tick never throws into the engine
@@ -1018,7 +1081,15 @@ export function register(on: On) {
   // ----------------------------------------------------------------- strip
 
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    if (!state.isInteractive || state.host === null || e.surface !== 'terminal' || e.props?.hasSurvey === true) {
+    if (!state.isInteractive || state.host === null || e.surface !== 'terminal') {
+      return next(e)
+    }
+
+    if (e.props?.hasSurvey === true) {
+      // The survey holds the band: the buttons wait under the prompt until it is answered.
+      settleBand(false, false)
+      traceUi('band', { passed: 'survey', maxRows: e.props?.maxRows })
+
       return next(e)
     }
 
@@ -1030,9 +1101,78 @@ export function register(on: On) {
     const view = viewNow()
     const columns = wholeOf(e.props?.bodyColumns) || wholeOf(e.viewport?.columns) || 100
     const segments = core.withHeld(core.segmentsOf(view, state.now, { seconds: true }), state.held)
+    const buttons = buttonsOf(view)
+    const site = state.buttonSite
+    // In fullscreen what the engine puts in the bottom slot first (its tasks list, while Claude is idle) can leave
+    // the band no row: then nothing of its tree is on screen, as while the person has collapsed it.
+    const fits = e.props?.isCollapsed !== true && !(typeof e.props?.maxRows === 'number' && e.props.maxRows < 1)
+    // A footer that has not answered for some ticks is not on screen, and holds nothing there.
+    const isFooterHolding = site.footer && state.ticks - site.footerTick <= FOOTER_GONE_TICKS
+    const draws = fits && !isFooterHolding
 
-    return stripView({ Box: table.Box, Text: table.Text, Button: table.Button }, segments, buttonsOf(view), columns)
+    settleBand(fits, draws)
+    traceUi('band', {
+      maxRows: e.props?.maxRows,
+      bodyColumns: e.props?.bodyColumns,
+      scroll: e.props?.scroll,
+      isWorking: e.props?.isWorking,
+      isCollapsed: e.props?.isCollapsed,
+      viewport: e.viewport,
+      agent: e.props?.view?.agentId ?? null,
+      cache: view.cache.state,
+      buttons: buttons.map(b => (b.isDim ? `${b.key}:dim` : b.key)),
+      fits,
+      draws,
+    })
+
+    return stripView({ Box: table.Box, Text: table.Text, Button: table.Button }, segments, buttons, columns, draws)
   })
+
+  // The buttons under the prompt, at the right end of its footer (the engine's mode labels' place), while the band
+  // has no row for the strip. Drawn there, the place is this hook's own, with the mode labels kept, as the strip's is.
+  on('ui.render', { component: 'SessionMode' }, ($, e, next) => {
+    if (!state.isInteractive || state.host === null || e.surface !== 'terminal') {
+      return next(e)
+    }
+
+    const site = state.buttonSite
+
+    site.footerTick = state.ticks
+
+    if (site.bandFits || site.band) {
+      if (site.footer) {
+        site.footer = false
+        // The strip takes them back on this redraw, not on the next tick.
+        state.host.invalidate()
+      }
+
+      traceUi('footer', { buttons: [] })
+
+      return next(e)
+    }
+
+    const table = $.ui.resolve(e)
+    const buttons = buttonsOf(viewNow())
+    const modes = Array.isArray(e.props?.modes) ? e.props.modes.filter((m: unknown): m is string => typeof m === 'string') : []
+
+    site.footer = buttons.length > 0
+    traceUi('footer', { viewport: e.viewport, modes, buttons: buttons.map(b => (b.isDim ? `${b.key}:dim` : b.key)) })
+
+    return footerView({ Box: table.Box, Text: table.Text, Button: table.Button }, modes, buttons)
+  })
+
+  /** The band's answer: whether its tree is on screen, and whether it drew the buttons. */
+  function settleBand(fits: boolean, draws: boolean): void {
+    const site = state.buttonSite
+
+    site.band = draws
+
+    if (site.bandFits !== fits) {
+      site.bandFits = fits
+      // The footer takes the buttons, or lets them go.
+      state.host?.invalidate()
+    }
+  }
 
   function buttonsOf(view: ReturnType<typeof core.viewOf>): StripButton[] {
     const handoff = state.handoff

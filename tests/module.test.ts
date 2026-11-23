@@ -20,7 +20,23 @@ const BAND = {
   plugin: PLUGIN,
 }
 
-const command = (name: string, args = '') => ({ command: name, args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+/** The band as the engine hands it, with some props changed. */
+const bandWith = (props: Record<string, unknown>) => ({ ...BAND, props: { ...BAND.props, ...props } })
+
+/** In fullscreen, idle, with the engine's tasks list in the bottom slot: the band has no row (measured on 2.1.322). */
+const NO_ROW = bandWith({ maxRows: 0, scroll: { offset: 0, bodyRows: 0 } })
+
+/** The right end of the prompt's footer, where the engine draws its mode labels. */
+const FOOTER = {
+  component: 'SessionMode',
+  surface: 'terminal',
+  requestId: 'mode',
+  viewport: { columns: 180, rows: 48, isFullscreen: true },
+  props: { modes: [] as string[] },
+  plugin: PLUGIN,
+}
+
+const command =(name: string, args = '') => ({ command: name, args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
 
 /** The week the usage fixture's login is in: a session of that login reads the same reset. */
 const WEEK_ENDS = Date.parse('2026-11-01T09:00:00Z')
@@ -346,6 +362,158 @@ describe('the strip above the prompt', () => {
     await clock.settle()
 
     expect(textOf(await $.ui.render(BAND as never))).toContain('○ cache ?')
+  })
+
+  test('a narrow band: the row holds its button whole, the text cut to what it leaves or left out', async ($, on) => {
+    const world = worldOf(on)
+    const clock = mock.clock(on, { now: T0 + 12 * M + 48_000 })
+
+    world.put(`${DIR}/live/sess-1.json`, JSON.stringify(snapshotFor('sess-1', T0)))
+    await $.session.start(SESSION as never)
+    await clock.settle()
+
+    // Under twelve columns left for it, no text: before, twelve were kept and the row ran past its end.
+    expect(textOf(await $.ui.render(bandWith({ bodyColumns: 30 }) as never))).toBe('[Handoff & Clear]')
+
+    const text = textOf(await $.ui.render(bandWith({ bodyColumns: 48 }) as never))
+
+    expect(text).toContain('● cache 47:12')
+    expect(text).not.toContain('next msg')
+    expect(text.endsWith('[Handoff & Clear]')).toBe(true)
+  })
+})
+
+describe('the buttons, wherever there is a row for them', () => {
+  const BUTTON = '[Handoff & Clear]'
+
+  /** The Buttons in a drawing, each with whether it is drawn dim. */
+  function buttonsIn(node: any): Array<{ label: string; isDim: boolean }> {
+    if (node === null || typeof node !== 'object') return []
+    const own = node.type === 'Button' ? [{ label: node.props?.label, isDim: node.props?.dimColor === true }] : []
+
+    return [...own, ...(node.children ?? []).flatMap((child: unknown) => buttonsIn(child))]
+  }
+
+  async function warm($: any, on: any) {
+    const world = worldOf(on)
+    const clock = mock.clock(on, { now: T0 + 12 * M + 48_000 })
+
+    world.put(`${DIR}/live/sess-1.json`, JSON.stringify(snapshotFor('sess-1', T0)))
+    await $.session.start(SESSION as never)
+    await clock.settle()
+
+    return { world, clock }
+  }
+
+  test('no row left above the prompt: the buttons are drawn under it, and go back up once there is one', async ($, on) => {
+    await warm($, on)
+
+    expect(textOf(await $.ui.render(BAND as never))).toContain(BUTTON)
+    expect(textOf(await $.ui.render(FOOTER as never)), 'the footer as the engine draws it').toBe('')
+
+    expect(textOf(await $.ui.render(NO_ROW as never))).not.toContain(BUTTON)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe(BUTTON)
+
+    // A row again: the strip keeps their place empty until the footer has let them go, then takes them.
+    const waiting = textOf(await $.ui.render(BAND as never))
+
+    expect(waiting).toContain('● cache 47:12')
+    expect(waiting).not.toContain(BUTTON)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe('')
+    expect(textOf(await $.ui.render(BAND as never))).toContain(BUTTON)
+  })
+
+  test('never on screen twice, whichever of the two sites the engine draws first', async ($, on) => {
+    await warm($, on)
+
+    const onScreen = { band: '', footer: '' }
+
+    for (const rows of [20, 0, 3, 0, 1, 20, 0]) {
+      for (const order of [['band', 'footer'], ['footer', 'band']] as const) {
+        for (const site of order) {
+          if (site === 'band') {
+            const tree = await $.ui.render(bandWith({ maxRows: rows, scroll: { offset: 0, bodyRows: Math.max(0, rows - 1) } }) as never)
+
+            // With no row for it, nothing of the band's tree is on screen.
+            onScreen.band = rows < 1 ? '' : textOf(tree)
+          } else {
+            onScreen.footer = textOf(await $.ui.render(FOOTER as never))
+          }
+
+          expect(onScreen.band.includes(BUTTON) && onScreen.footer.includes(BUTTON), `${rows} rows, ${order.join(' then ')}`).toBe(false)
+        }
+      }
+
+      // Each site drawn twice, either way round: the buttons are on screen once, where there is room.
+      expect([onScreen.band, onScreen.footer].filter(text => text.includes(BUTTON)).length, `${rows} rows`).toBe(1)
+      expect(onScreen[rows < 1 ? 'footer' : 'band'], `${rows} rows`).toContain(BUTTON)
+    }
+  })
+
+  test('a footer no longer drawn holds nothing: a few ticks on, the band takes the buttons from it', async ($, on) => {
+    const { clock } = await warm($, on)
+
+    await $.ui.render(NO_ROW as never)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe(BUTTON)
+    expect(textOf(await $.ui.render(BAND as never))).not.toContain(BUTTON)
+
+    await clock.advance(4000)
+
+    expect(textOf(await $.ui.render(BAND as never))).toContain(BUTTON)
+  })
+
+  test('a collapsed band, and a survey holding it: the buttons are under the prompt', async ($, on) => {
+    await warm($, on)
+
+    await $.ui.render(bandWith({ isCollapsed: true }) as never)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe(BUTTON)
+    expect(textOf(await $.ui.render(BAND as never)), 'expanded: the footer lets go first').not.toContain(BUTTON)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe('')
+    expect(textOf(await $.ui.render(BAND as never))).toContain(BUTTON)
+
+    await $.ui.render(bandWith({ hasSurvey: true }) as never)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe(BUTTON)
+  })
+
+  test('under the prompt the mode labels stay before the buttons, and the terminal accepts it at every width', async ($, on) => {
+    await warm($, on)
+
+    await $.ui.render(NO_ROW as never)
+    expect(textOf(await $.ui.render({ ...FOOTER, props: { modes: ['focus', 'memory paused'] } } as never))).toBe(`focus & memory paused${BUTTON}`)
+
+    for (const columns of [40, 80, 120, 200]) {
+      expect(await accepted($, { ...FOOTER, viewport: { ...FOOTER.viewport, columns } })).toBe('terminal')
+    }
+  })
+
+  test('dim under the prompt while Claude works, as in the strip', async ($, on) => {
+    await warm($, on)
+
+    await $.ui.render(bandWith({ maxRows: 0, isWorking: true, scroll: { offset: 0, bodyRows: 0 } }) as never)
+    expect(buttonsIn(await $.ui.render(FOOTER as never))).toEqual([{ label: 'Handoff & Clear', isDim: true }])
+
+    await $.ui.render(NO_ROW as never)
+    expect(buttonsIn(await $.ui.render(FOOTER as never))).toEqual([{ label: 'Handoff & Clear', isDim: false }])
+  })
+
+  test('pressed under the prompt, Handoff & Clear does what it does in the strip', async ($, on) => {
+    const { world, clock } = await warm($, on)
+
+    world.forkAnswer = { isAnswered: true, text: '<handoff>\n## Goal\nShip Cache Keeper.\n## Next steps\n1. Field-test the strip.\n</handoff>', usage: {} }
+    await $.ui.render(NO_ROW as never)
+    expect(textOf(await $.ui.render(FOOTER as never))).toBe(BUTTON)
+    await $.ui.press({ plugin: PLUGIN, key: 'handoff' } as never)
+
+    expect(world.forks.length).toBe(1)
+
+    await clock.advance(100)
+
+    expect(world.ran).toEqual(['clear'])
+
+    await clock.advance(200)
+
+    expect(world.fills.length).toBe(1)
+    expect(world.fills[0]).toContain('Ship Cache Keeper.')
   })
 })
 

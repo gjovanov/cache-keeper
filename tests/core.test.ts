@@ -424,6 +424,24 @@ describe('the strip', () => {
     expect(core.lineWidth([seg('a', 'aaaa', 1), seg('a+', 'x', 1, true), seg('b', 'bb', 1)], 3)).toBe(4 + 1 + 1 + 3 + 2)
   })
 
+  test('the buttons have the row first: the text gets what they leave, and nothing under twelve columns', () => {
+    const warm = ['Handoff & Clear']
+    const cold = ['Use Latest Handoff', 'Pack & Clear']
+
+    // `[ label ]` each, one column between two.
+    expect(core.buttonsWidth(warm)).toBe(19)
+    expect(core.buttonsWidth(cold)).toBe(22 + 1 + 16)
+    expect(core.buttonsWidth([])).toBe(0)
+    // Less the band's control at the right edge and the two columns before the buttons.
+    expect(core.textRoom(160, warm)).toBe(160 - 5 - 19 - 2)
+    expect(core.textRoom(38, warm)).toBe(12)
+    expect(core.textRoom(37, warm), 'the row is the button alone').toBe(0)
+    // Two cold buttons beside a pane docked in a 120-column terminal (61 columns of band, measured).
+    expect(core.textRoom(61, cold)).toBe(15)
+    expect(core.textRoom(57, cold)).toBe(0)
+    expect(core.textRoom(20, [])).toBe(13)
+  })
+
   test("every fact the strip promises is in it, at a terminal's width", () => {
     const snapshot = core.snapshotOfStatusLine(
       {
